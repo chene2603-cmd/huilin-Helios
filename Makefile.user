@@ -1,0 +1,28 @@
+# User Programs Makefile
+CC = gcc
+AS = nasm
+LD = ld
+OBJCOPY = objcopy
+
+CFLAGS = -m32 -ffreestanding -fno-pic -fno-builtin -nostdlib \
+         -Wall -Wextra -Werror -std=c99 -I../include
+LDFLAGS = -m elf_i386 -T user.ld -nostdlib
+
+USER_SRCS = init.c shell.c test.c
+USER_OBJS = $(patsubst %.c,%.o,$(USER_SRCS))
+USER_BINS = init.bin shell.bin test.bin
+
+all: $(USER_BINS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+%.bin: %.o
+	$(LD) $(LDFLAGS) $< -o $@.elf
+	$(OBJCOPY) -O binary $@.elf $@
+	rm $@.elf
+
+clean:
+	rm -f *.o *.bin *.elf
+
+.PHONY: all clean
