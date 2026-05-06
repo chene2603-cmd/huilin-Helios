@@ -1,92 +1,62 @@
 #include "system.h"
-#include "screen.h"
 #include "timer.h"
 #include "isr.h"
+#include "screen.h"
 
-// 定时器相关
-static uint32_t timer_ticks = 0;
-static uint32_t timer_frequency = 100;  // 100Hz
+// PIT 频率（Hz），可配置
+#define PIT_BASE_FREQUENCY 1193180
+
+static volatile uint32_t tick_count = 0;        // 滴答数（从启动开始）
+static uint32_t frequency = 100;                // 默认 100 Hz
+static uint32_t ms_per_tick = 10;               // 每滴答毫秒数
+
+// 定时器中断处理程序（IRQ0）
+static void timer_callback(registers_t *regs) {
+    (void)regs;
+    tick_count++;
+    // 这里可以添加唤醒睡眠进程的逻辑，当前版本先留空
+}
 
 // 初始化定时器
-void init_timer(uint32_t frequency) {
-    screen_putstr("Initializing Timer... ");
-    
-    timer_frequency = frequency;
-    
-    // 设置PIT（可编程间隔定时器）
-    uint32_t divisor = 1193180 / frequency;
-    
-    // 发送命令字节
-    outb(0x43, 0x36);
-    
-    // 发送分频器
-    outb(0x40, divisor & 0xFF);
-    outb(0x40, (divisor >> 8) & 0xFF);
-    
-    // 注册中断处理程序
-    register_interrupt_handler(32, timer_interrupt_handler);
-    
+void init_timer(uint32_t freq) {
+    if (freq == 0) freq = 100;
+    frequency = freq;
+
+    // 计算 PIT 分频值
+    uint32_t divisor = PIT_BASE_FREQUENCY / freq;
+
+    // 计算每滴答的毫秒数（近似，可能稍有误差）
+    ms_per_tick = 1000 / freq;
+
+    // 设置 PIT 通道 0 为模式 3（方波发生器）
+    outb(0x43, 0x36);                     // 命令字节：通道0、低字节/高字节、模式3
+    outb(0x40, (uint8_t)(divisor & 0xFF));
+    outb(0x40, (uint8_t)((divisor >> 8) & 0xFF));
+
+    // 注册 IRQ0 处理函数（IRQ0 对应中断向量 32）
+    register_interrupt_handler(32, timer_callback);
+
     screen_setcolor(COLOR_LIGHT_GREEN, COLOR_BLACK);
-    screen_putstr("OK\n");
-    screen_setcolor(COLOR_LIGHT_GREY, COLOR_BLACK);
-    screen_putstr("  Frequency: ");
-    screen_putdec(frequency);
+    screen_putstr("Timer initialized: ");
+    screen_putdec(freq);
     screen_putstr(" Hz\n");
-}
-
-// 定时器中断处理程序
-void timer_interrupt_handler(registers_t* regs) {
-    timer_ticks++;
-    
-    // 处理定时器事件
-    timer_tick_handler(regs);
-}
-
-// 获取当前滴答数
-uint32_t get_ticks(void) {
-    return timer_ticks;
-}
-
-// 获取当前时间（毫秒）
-uint32_t get_time_ms(void) {
-    return timer_ticks * (1000 / timer_frequency);
-}
-
-// 更新滴答数
-void update_ticks(void) {
-    timer_ticks++;
-}
-
-// 延时函数（忙等待）
-void delay_ms(uint32_t milliseconds) {
-    uint32_t start = get_time_ms();
-    while (get_time_ms() - start < milliseconds) {
-        asm volatile("pause");
-    }
-}
-
-// 显示时间
-void show_time(void) {
-    uint32_t seconds = get_time_ms() / 1000;
-    uint32_t minutes = seconds / 60;
-    uint32_t hours = minutes / 60;
-    
     screen_setcolor(COLOR_LIGHT_GREY, COLOR_BLACK);
-    screen_putstr("System uptime: ");
-    if (hours > 0) {
-        screen_putdec(hours);
-        screen_putstr("h ");
+}
+
+// 获取系统启动以来的毫秒数
+uint32_t get_time_ms(void) {
+    return tick_count * ms_per_tick;
+}
+
+// 获取滴答计数
+uint32_t get_ticks(void) {
+    return tick_count;
+}
+
+// 忙等待（毫秒级，简单实现）
+void delay_ms(uint32_t ms) {
+    uint32_t start = tick_count * ms_per_tick;
+    while ((tick_count * ms_per_tick) - start < ms) {
+        asm volatile("hlt");   // 省电等待
     }
-    if (minutes > 0) {
-        screen_putdec(minutes % 60);
-        screen_putstr("m ");
-    }
-    screen_putdec(seconds % 60);
-    screen_putstr(".");
-    
-    uint32_t ms = get_time_ms() % 1000;
-    if (ms < 100) screen_putstr("0");
-    if (ms < 10) screen_putstr("0");
-    screen_putdec(ms);
-    screen_putstr("s\n");
 }
