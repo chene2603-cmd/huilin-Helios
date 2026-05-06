@@ -1,158 +1,115 @@
-;==========================================================
-; 中断服务例程汇编部分
-;==========================================================
-
-section .text
-
-; 外部函数声明
-extern isr_handler
-extern irq_handler
-
-; 宏定义：无错误码的中断
-%macro ISR_NOERRCODE 1
+; kernel/isr.asm
+%macro ISR_NOERR 1
 global isr%1
 isr%1:
-    push byte 0          ; 压入错误码占位符
-    push byte %1         ; 压入中断号
-    jmp isr_common_stub
+    push 0
+    push %1
+    jmp common_isr
 %endmacro
 
-; 宏定义：有错误码的中断
-%macro ISR_ERRCODE 1
+%macro ISR_ERR 1
 global isr%1
 isr%1:
-    push byte %1         ; 压入中断号
-    jmp isr_common_stub
+    push %1
+    jmp common_isr
 %endmacro
 
-; 宏定义：IRQ处理程序
 %macro IRQ 2
 global irq%1
 irq%1:
-    push byte 0
-    push byte %2
-    jmp irq_common_stub
+    push 0
+    push %2
+    jmp common_irq
 %endmacro
 
-; 无错误码的异常
-ISR_NOERRCODE 0
-ISR_NOERRCODE 1
-ISR_NOERRCODE 2
-ISR_NOERRCODE 3
-ISR_NOERRCODE 4
-ISR_NOERRCODE 5
-ISR_NOERRCODE 6
-ISR_NOERRCODE 7
-ISR_ERRCODE   8
-ISR_NOERRCODE 9
-ISR_ERRCODE   10
-ISR_ERRCODE   11
-ISR_ERRCODE   12
-ISR_ERRCODE   13
-ISR_ERRCODE   14
-ISR_NOERRCODE 15
-ISR_NOERRCODE 16
-ISR_NOERRCODE 17
-ISR_NOERRCODE 18
-ISR_NOERRCODE 19
-ISR_NOERRCODE 20
-ISR_NOERRCODE 21
-ISR_NOERRCODE 22
-ISR_NOERRCODE 23
-ISR_NOERRCODE 24
-ISR_NOERRCODE 25
-ISR_NOERRCODE 26
-ISR_NOERRCODE 27
-ISR_NOERRCODE 28
-ISR_NOERRCODE 29
-ISR_NOERRCODE 30
-ISR_NOERRCODE 31
+section .text
+extern isr_handler
+extern irq_handler
 
-; IRQ处理程序
-IRQ 0, 32
-IRQ 1, 33
-IRQ 2, 34
-IRQ 3, 35
-IRQ 4, 36
-IRQ 5, 37
-IRQ 6, 38
-IRQ 7, 39
-IRQ 8, 40
-IRQ 9, 41
+common_isr:
+    pusha
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    call isr_handler
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    popa
+    add esp, 8
+    iret
+
+common_irq:
+    pusha
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    call irq_handler
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    popa
+    add esp, 8
+    iret
+
+ISR_NOERR  0
+ISR_NOERR  1
+ISR_NOERR  2
+ISR_NOERR  3
+ISR_NOERR  4
+ISR_NOERR  5
+ISR_NOERR  6
+ISR_NOERR  7
+ISR_ERR    8
+ISR_NOERR  9
+ISR_ERR   10
+ISR_ERR   11
+ISR_ERR   12
+ISR_ERR   13
+ISR_ERR   14
+ISR_NOERR 15
+ISR_NOERR 16
+ISR_NOERR 17
+ISR_NOERR 18
+ISR_NOERR 19
+ISR_NOERR 20
+ISR_NOERR 21
+ISR_NOERR 22
+ISR_NOERR 23
+ISR_NOERR 24
+ISR_NOERR 25
+ISR_NOERR 26
+ISR_NOERR 27
+ISR_NOERR 28
+ISR_NOERR 29
+ISR_NOERR 30
+ISR_NOERR 31
+
+IRQ  0, 32
+IRQ  1, 33
+IRQ  2, 34
+IRQ  3, 35
+IRQ  4, 36
+IRQ  5, 37
+IRQ  6, 38
+IRQ  7, 39
+IRQ  8, 40
+IRQ  9, 41
 IRQ 10, 42
 IRQ 11, 43
 IRQ 12, 44
 IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
-
-; 系统调用中断
-global isr128
-isr128:
-    push byte 0
-    push byte 0x80
-    jmp isr_common_stub
-
-; 通用ISR处理存根
-isr_common_stub:
-    ; 保存所有寄存器
-    pusha
-    push ds
-    push es
-    push fs
-    push gs
-    
-    ; 加载内核数据段
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    
-    ; 调用C处理函数
-    push esp
-    call isr_handler
-    add esp, 4
-    
-    ; 恢复寄存器
-    pop gs
-    pop fs
-    pop es
-    pop ds
-    popa
-    
-    ; 清理栈
-    add esp, 8
-    iret
-
-; 通用IRQ处理存根
-irq_common_stub:
-    ; 保存所有寄存器
-    pusha
-    push ds
-    push es
-    push fs
-    push gs
-    
-    ; 加载内核数据段
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    
-    ; 调用C处理函数
-    push esp
-    call irq_handler
-    add esp, 4
-    
-    ; 恢复寄存器
-    pop gs
-    pop fs
-    pop es
-    pop ds
-    popa
-    
-    ; 清理栈
-    add esp, 8
-    iret
