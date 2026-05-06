@@ -1,4 +1,6 @@
 ; kernel/isr.asm
+; 中断服务例程，调用 isr_handler / irq_handler
+
 %macro ISR_NOERR 1
 global isr%1
 isr%1:
@@ -30,7 +32,7 @@ common_isr:
     pusha
     mov ax, ds
     push eax
-    mov ax, 0x10
+    mov ax, 0x10         ; 内核数据段选择子
     mov ds, ax
     mov es, ax
     mov fs, ax
@@ -42,7 +44,7 @@ common_isr:
     mov fs, ax
     mov gs, ax
     popa
-    add esp, 8
+    add esp, 8           ; 清理中断号和错误码
     iret
 
 common_irq:
@@ -64,6 +66,7 @@ common_irq:
     add esp, 8
     iret
 
+; CPU 异常 (ISR 0-31)
 ISR_NOERR  0
 ISR_NOERR  1
 ISR_NOERR  2
@@ -97,6 +100,7 @@ ISR_NOERR 29
 ISR_NOERR 30
 ISR_NOERR 31
 
+; IRQ 0-15 (映射到中断向量 32-47)
 IRQ  0, 32
 IRQ  1, 33
 IRQ  2, 34
