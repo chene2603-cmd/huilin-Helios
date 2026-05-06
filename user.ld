@@ -1,28 +1,10 @@
-/* 用户程序链接脚本 */
-OUTPUT_FORMAT(elf32-i386)
+/* user.ld */
 ENTRY(_start)
 
 SECTIONS
 {
-    /* 用户程序加载地址 */
-    . = 0x400000;
-    
-    .text : {
-        *(.text)
-    }
-    
-    .rodata : {
-        *(.rodata)
-    }
-    
-    .data : {
-        *(.data)
-    }
-    
-    .bss : {
-        *(COMMON)
-        *(.bss)
-    }
-    
-    _end = .;
+    . = 0x400000;    /* 用户代码从 4MB 开始 */
+    .text : { *(.text) }
+    .data : { *(.data) }
+    .bss  : { *(.bss)  }
 }
