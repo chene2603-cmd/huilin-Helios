@@ -1,6 +1,5 @@
 ; boot/boot.asm
-; Multiboot 引导，设置基本环境，跳入内核
-
+; Helios Multiboot 引导程序
 MBALIGN  equ 1<<0
 MEMINFO  equ 1<<1
 FLAGS    equ MBALIGN | MEMINFO
@@ -21,16 +20,13 @@ stack_top:
 
 section .text
 global _start
-extern kernel_main      ; 在 kernel/main.c 中定义
+extern kernel_main      ; kernel.c 中的主函数
 
 _start:
-    mov esp, stack_top   ; 设置栈指针
-
-    push eax             ; 传递 Multiboot 魔数
-    push ebx             ; 传递 Multiboot 信息结构指针
-
+    mov esp, stack_top
+    push eax             ; Multiboot 魔数
+    push ebx             ; Multiboot 信息结构指针
     call kernel_main
-
     cli
 .hang:
     hlt
