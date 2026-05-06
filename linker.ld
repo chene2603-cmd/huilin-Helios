@@ -1,9 +1,9 @@
-/* linker.ld */
+/* linker.ld - Helios Kernel */
 ENTRY(_start)
 
 SECTIONS
 {
-    . = 1M;                /* 内核从 1MB 开始加载 */
+    . = 1M;
 
     .multiboot ALIGN(4) :
     {
