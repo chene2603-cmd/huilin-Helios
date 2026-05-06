@@ -1,444 +1,200 @@
 #include "system.h"
-#include "screen.h"
 #include "process.h"
-#include "scheduler.h"
+#include "pmm.h"
+#include "vmm.h"
 #include "kheap.h"
-#include "paging.h"
+#include "screen.h"
 #include "string.h"
 
-// 全局变量
-static pcb_t* current_process = NULL;
-static pcb_t* process_list = NULL;
+#define MAX_PROCESSES 64
+
+static pcb_t process_table[MAX_PROCESSES];
+static pcb_t *current_process = NULL;
 static uint32_t next_pid = 1;
-static pcb_t* init_process = NULL;
 
-// 初始化进程管理器
-void init_process_manager(void) {
-    screen_putstr("Initializing Process Manager... ");
-    
-    process_list = NULL;
-    next_pid = 1;
-    
-    // 创建初始进程（内核空闲进程）
-    init_process = create_process("idle", NULL);
-    if (!init_process) {
-        screen_setcolor(COLOR_LIGHT_RED, COLOR_BLACK);
-        screen_putstr("Failed to create idle process!\n");
-        return;
-    }
-    
-    init_process->state = PROCESS_RUNNING;
-    current_process = init_process;
-    
-    screen_setcolor(COLOR_LIGHT_GREEN, COLOR_BLACK);
-    screen_putstr("OK\n");
-    screen_setcolor(COLOR_LIGHT_GREY, COLOR_BLACK);
-    screen_putstr("  Idle process PID: ");
-    screen_putdec(init_process->pid);
-    screen_putstr("\n");
-}
+// 进程调度队列头（简单链表）
+static pcb_t *ready_queue = NULL;
 
-// 创建新进程
-pcb_t* create_process(const char* name, void* entry_point) {
-    // 分配PCB
-    pcb_t* proc = (pcb_t*)kmalloc(sizeof(pcb_t));
-    if (!proc) {
-        screen_setcolor(COLOR_LIGHT_RED, COLOR_BLACK);
-        screen_putstr("Failed to allocate PCB!\n");
-        return NULL;
-    }
-    
-    // 初始化PCB
-    memset(proc, 0, sizeof(pcb_t));
-    
-    proc->pid = next_pid++;
-    strncpy(proc->name, name, sizeof(proc->name) - 1);
-    proc->name[sizeof(proc->name) - 1] = '\0';
-    proc->state = PROCESS_NEW;
-    
-    // 初始化页目录
-    proc->page_dir = (page_directory_t*)kmalloc(sizeof(page_directory_t));
-    if (!proc->page_dir) {
-        kfree(proc);
-        return NULL;
-    }
-    
-    // 复制内核页目录
-    memcpy(proc->page_dir, get_kernel_page_dir(), sizeof(page_directory_t));
-    
-    // 设置用户空间
-    // 用户空间：0x00000000 - 0xBFFFFFFF (3GB)
-    // 内核空间：0xC0000000 - 0xFFFFFFFF (1GB)
-    
-    // 分配用户栈
-    void* user_stack = alloc_page(PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-    if (!user_stack) {
-        kfree(proc->page_dir);
-        kfree(proc);
-        return NULL;
-    }
-    
-    // 分配用户代码页
-    void* user_code = alloc_page(PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
-    if (!user_code) {
-        free_page(user_stack);
-        kfree(proc->page_dir);
-        kfree(proc);
-        return NULL;
-    }
-    
-    // 设置寄存器上下文
-    if (entry_point) {
-        // 用户进程
-        proc->eip = (uint32_t)entry_point;
-        proc->esp = (uint32_t)user_stack + PAGE_SIZE - 16;  // 栈顶
-        proc->ebp = proc->esp;
-        
-        // 用户模式段选择子
-        proc->cs = 0x1B;  // 用户代码段
-        proc->ds = 0x23;  // 用户数据段
-        proc->es = 0x23;
-        proc->fs = 0x23;
-        proc->gs = 0x23;
-        proc->ss = 0x23;
-        
-        // 启用中断
-        proc->eflags = 0x200;  // 启用中断
+// 内部函数：将进程加入就绪队列尾部
+static void enqueue_process(pcb_t *proc) {
+    proc->next = NULL;
+    if (!ready_queue) {
+        ready_queue = proc;
     } else {
-        // 内核进程
-        proc->eip = 0;
-        proc->esp = 0;
-        proc->ebp = 0;
-        
-        // 内核段选择子
-        proc->cs = 0x08;
-        proc->ds = 0x10;
-        proc->es = 0x10;
-        proc->fs = 0x10;
-        proc->gs = 0x10;
-        proc->ss = 0x10;
-        
-        proc->eflags = 0;
+        pcb_t *p = ready_queue;
+        while (p->next) p = p->next;
+        p->next = proc;
     }
-    
-    // 初始化文件描述符
-    for (int i = 0; i < 16; i++) {
-        proc->fd[i] = -1;
-    }
-    
-    // 标准输入输出错误
-    proc->fd[0] = 0;  // stdin
-    proc->fd[1] = 1;  // stdout
-    proc->fd[2] = 2;  // stderr
-    
-    // 调度信息
-    proc->priority = 10;
-    proc->time_slice = 100;  // 100ms
-    
-    // 添加到进程列表
-    proc->next = process_list;
-    process_list = proc;
-    
-    return proc;
 }
 
-// 复制当前进程（fork）
-pcb_t* fork_process(void) {
-    pcb_t* parent = current_process;
-    
-    // 创建子进程PCB
-    pcb_t* child = create_process(parent->name, NULL);
-    if (!child) {
-        return NULL;
-    }
-    
-    // 设置父子关系
-    child->parent = parent;
-    child->sibling = parent->children;
-    parent->children = child;
-    
-    // 复制寄存器上下文
-    child->eax = parent->eax;
-    child->ebx = parent->ebx;
-    child->ecx = parent->ecx;
-    child->edx = parent->edx;
-    child->esi = parent->esi;
-    child->edi = parent->edi;
-    child->esp = parent->esp;
-    child->ebp = parent->ebp;
-    child->eip = parent->eip;
-    child->eflags = parent->eflags;
-    
-    child->cs = parent->cs;
-    child->ds = parent->ds;
-    child->es = parent->es;
-    child->fs = parent->fs;
-    child->gs = parent->gs;
-    child->ss = parent->ss;
-    
-    // 复制页目录
-    // 这里需要复制用户空间的页面
-    // 简化实现：只复制内核部分
-    
-    // 复制文件描述符
-    for (int i = 0; i < 16; i++) {
-        child->fd[i] = parent->fd[i];
-    }
-    
-    // fork返回值：子进程返回0，父进程返回子进程PID
-    parent->eax = child->pid;
-    child->eax = 0;
-    
-    // 设置状态
-    child->state = PROCESS_READY;
-    
-    // 添加到就绪队列
-    add_to_ready_queue(child);
-    
-    return child;
+// 内部函数：从就绪队列头部取出进程
+static pcb_t *dequeue_process(void) {
+    if (!ready_queue) return NULL;
+    pcb_t *p = ready_queue;
+    ready_queue = p->next;
+    p->next = NULL;
+    return p;
 }
 
-// 终止进程
-void exit_process(int exit_code) {
-    pcb_t* proc = current_process;
-    
-    screen_setcolor(COLOR_LIGHT_GREY, COLOR_BLACK);
-    screen_putstr("Process ");
-    screen_putstr(proc->name);
-    screen_putstr(" (PID=");
-    screen_putdec(proc->pid);
-    screen_putstr(") exited with code ");
-    screen_putdec(exit_code);
-    screen_putstr("\n");
-    
-    // 设置退出状态
-    proc->exit_code = exit_code;
-    proc->state = PROCESS_ZOMBIE;
-    
-    // 唤醒父进程
-    if (proc->parent) {
-        wakeup_process(proc->parent);
+// 调度器：选择下一个进程
+pcb_t *scheduler_get_next(void) {
+    if (current_process && current_process->state == PROCESS_RUNNING) {
+        current_process->state = PROCESS_READY;
+        enqueue_process(current_process);
     }
-    
-    // 切换到空闲进程
-    current_process = init_process;
-    
-    // 调度
-    schedule();
-}
-
-// 等待子进程
-void wait_process(uint32_t pid) {
-    pcb_t* parent = current_process;
-    pcb_t* child = parent->children;
-    
-    while (child) {
-        if ((pid == 0 || child->pid == pid) && 
-            child->state == PROCESS_ZOMBIE) {
-            // 找到僵尸子进程
-            
-            // 从子进程列表中移除
-            if (parent->children == child) {
-                parent->children = child->sibling;
-            } else {
-                pcb_t* prev = parent->children;
-                while (prev->sibling != child) {
-                    prev = prev->sibling;
-                }
-                prev->sibling = child->sibling;
-            }
-            
-            // 释放资源
-            kfree(child->page_dir);
-            kfree(child);
-            
-            return;
-        }
-        child = child->sibling;
+    pcb_t *next = dequeue_process();
+    if (!next) {
+        // 就绪队列空，让 idle 进程运行（如果实现）或 panic
+        screen_putstr("No ready process!\n");
+        for(;;);
     }
-    
-    // 没有可回收的子进程，阻塞当前进程
-    parent->state = PROCESS_BLOCKED;
-    schedule();
-}
-
-// 杀死进程
-void kill_process(uint32_t pid, int signal) {
-    pcb_t* proc = process_list;
-    
-    while (proc) {
-        if (proc->pid == pid) {
-            screen_setcolor(COLOR_LIGHT_RED, COLOR_BLACK);
-            screen_putstr("Killing process ");
-            screen_putstr(proc->name);
-            screen_putstr(" (PID=");
-            screen_putdec(pid);
-            screen_putstr(") with signal ");
-            screen_putdec(signal);
-            screen_putstr("\n");
-            
-            // 发送信号
-            // 简化实现：直接终止进程
-            exit_process(128 + signal);
-            return;
-        }
-        proc = proc->next;
-    }
-    
-    screen_setcolor(COLOR_YELLOW, COLOR_BLACK);
-    screen_putstr("Process ");
-    screen_putdec(pid);
-    screen_putstr(" not found\n");
+    next->state = PROCESS_RUNNING;
+    current_process = next;
+    return next;
 }
 
 // 获取当前进程
-pcb_t* get_current_process(void) {
+pcb_t *get_current_process(void) {
     return current_process;
 }
 
-// 获取当前进程ID
-uint32_t get_pid(void) {
-    return current_process ? current_process->pid : 0;
+// 获取 PID
+int32_t get_pid(void) {
+    if (!current_process) return 0;
+    return current_process->pid;
 }
 
-// 切换进程上下文
-void switch_process(pcb_t* new_process) {
-    if (!new_process || new_process == current_process) {
-        return;
-    }
-    
-    pcb_t* old_process = current_process;
-    
-    // 保存旧进程上下文
-    if (old_process && old_process->state == PROCESS_RUNNING) {
-        // 保存寄存器
-        asm volatile("mov %%eax, %0" : "=m"(old_process->eax));
-        asm volatile("mov %%ebx, %0" : "=m"(old_process->ebx));
-        asm volatile("mov %%ecx, %0" : "=m"(old_process->ecx));
-        asm volatile("mov %%edx, %0" : "=m"(old_process->edx));
-        asm volatile("mov %%esi, %0" : "=m"(old_process->esi));
-        asm volatile("mov %%edi, %0" : "=m"(old_process->edi));
-        asm volatile("mov %%esp, %0" : "=m"(old_process->esp));
-        asm volatile("mov %%ebp, %0" : "=m"(old_process->ebp));
-        
-        // 保存eip
-        uint32_t eip;
-        asm volatile("call 1f\n1: pop %0" : "=r"(eip));
-        old_process->eip = eip - 5;  // 减去call指令大小
-        
-        // 保存eflags
-        asm volatile("pushf\npop %0" : "=r"(old_process->eflags));
-        
-        // 保存段寄存器
-        asm volatile("mov %%cs, %0" : "=r"(old_process->cs));
-        asm volatile("mov %%ds, %0" : "=r"(old_process->ds));
-        asm volatile("mov %%es, %0" : "=r"(old_process->es));
-        asm volatile("mov %%fs, %0" : "=r"(old_process->fs));
-        asm volatile("mov %%gs, %0" : "=r"(old_process->gs));
-        asm volatile("mov %%ss, %0" : "=r"(old_process->ss));
-        
-        // 更新状态
-        old_process->state = PROCESS_READY;
-    }
-    
-    // 设置新进程
-    current_process = new_process;
-    new_process->state = PROCESS_RUNNING;
-    
-    // 切换页目录
-    if (new_process->page_dir != get_kernel_page_dir()) {
-        switch_page_directory(new_process->page_dir);
-    }
-    
-    // 恢复寄存器上下文
-    asm volatile("mov %0, %%cr3" : : "r"(new_process->page_dir));
-    
-    // 设置段寄存器
-    asm volatile("mov %0, %%ds" : : "r"(new_process->ds));
-    asm volatile("mov %0, %%es" : : "r"(new_process->es));
-    asm volatile("mov %0, %%fs" : : "r"(new_process->fs));
-    asm volatile("mov %0, %%gs" : : "r"(new_process->gs));
-    asm volatile("mov %0, %%ss" : : "r"(new_process->ss));
-    
-    // 设置栈指针
-    asm volatile("mov %0, %%esp" : : "r"(new_process->esp));
-    asm volatile("mov %0, %%ebp" : : "r"(new_process->ebp));
-    
-    // 设置通用寄存器
-    asm volatile("mov %0, %%eax" : : "r"(new_process->eax));
-    asm volatile("mov %0, %%ebx" : : "r"(new_process->ebx));
-    asm volatile("mov %0, %%ecx" : : "r"(new_process->ecx));
-    asm volatile("mov %0, %%edx" : : "r"(new_process->edx));
-    asm volatile("mov %0, %%esi" : : "r"(new_process->esi));
-    asm volatile("mov %0, %%edi" : : "r"(new_process->edi));
-    
-    // 设置eflags
-    asm volatile("push %0\npopf" : : "r"(new_process->eflags));
-    
-    // 跳转到eip
-    asm volatile("jmp *%0" : : "r"(new_process->eip));
+// 初始化进程子系统
+void init_process(void) {
+    screen_putstr("Initializing Process Subsystem... ");
+    memset(process_table, 0, sizeof(process_table));
+    ready_queue = NULL;
+
+    // 创建内核 idle 进程（PID 0）
+    pcb_t *idle = &process_table[0];
+    idle->pid = 0;
+    strcpy(idle->name, "idle");
+    idle->state = PROCESS_RUNNING;
+    idle->page_dir = vmm_get_kernel_directory();  // 内核页目录
+    idle->brk = 0x100000;  // 示例
+    idle->time_slice = 10;
+    for (int i = 0; i < 16; i++) idle->fd[i] = -1;
+    current_process = idle;
+    next_pid = 1;
+
+    screen_setcolor(COLOR_LIGHT_GREEN, COLOR_BLACK);
+    screen_putstr("OK\n");
 }
 
-// 睡眠进程
-void sleep_process(uint32_t milliseconds) {
-    pcb_t* proc = current_process;
-    
-    proc->state = PROCESS_BLOCKED;
-    proc->wakeup_time = get_ticks() + milliseconds;
-    
-    schedule();
-}
-
-// 唤醒进程
-void wakeup_process(pcb_t* process) {
-    if (!process || process->state != PROCESS_BLOCKED) {
-        return;
-    }
-    
-    process->state = PROCESS_READY;
-    add_to_ready_queue(process);
-}
-
-// 显示进程信息
-void show_processes(void) {
-    screen_setcolor(COLOR_LIGHT_CYAN, COLOR_BLACK);
-    screen_putstr("\nProcess List:\n");
-    screen_setcolor(COLOR_LIGHT_GREY, COLOR_BLACK);
-    
-    screen_putstr("PID  State       Name\n");
-    screen_putstr("---  ----------  --------------------\n");
-    
-    pcb_t* proc = process_list;
-    while (proc) {
-        // 显示PID
-        screen_putdec(proc->pid);
-        if (proc->pid < 10) screen_putstr("  ");
-        else if (proc->pid < 100) screen_putstr(" ");
-        
-        screen_putstr("  ");
-        
-        // 显示状态
-        switch (proc->state) {
-            case PROCESS_NEW:      screen_putstr("NEW       "); break;
-            case PROCESS_READY:    screen_putstr("READY     "); break;
-            case PROCESS_RUNNING:  screen_putstr("RUNNING   "); break;
-            case PROCESS_BLOCKED:  screen_putstr("BLOCKED   "); break;
-            case PROCESS_ZOMBIE:   screen_putstr("ZOMBIE    "); break;
-            case PROCESS_TERMINATED: screen_putstr("TERMINATED"); break;
+// 创建一个新进程（不复制内存，仅分配 PCB）
+static pcb_t *create_process_empty(void) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (process_table[i].state == PROCESS_TERMINATED || process_table[i].pid == 0) {
+            pcb_t *p = &process_table[i];
+            memset(p, 0, sizeof(pcb_t));
+            p->pid = next_pid++;
+            p->state = PROCESS_NEW;
+            p->time_slice = 10;
+            for (int j = 0; j < 16; j++) p->fd[j] = -1;
+            return p;
         }
-        
-        screen_putstr("  ");
-        
-        // 显示进程名
-        screen_putstr(proc->name);
-        
-        // 标记当前进程
-        if (proc == current_process) {
-            screen_putstr("  <--");
-        }
-        
-        screen_putstr("\n");
-        
-        proc = proc->next;
     }
+    return NULL;
+}
+
+// 复制页目录和用户空间内存（简化：同一页目录共享，仅标记写时复制 --- 这里简化为完全复制）
+static page_directory_t *clone_user_space(page_directory_t *src) {
+    // 简化实现：直接使用同一个页目录（真实系统应执行 COW）
+    // 为简单起见，我们直接返回内核目录，并映射相同的物理页
+    // 这仅用于演示，真实 fork 需要复制页表和物理内存
+    return src;
+}
+
+// fork 进程
+pcb_t *fork_process(void) {
+    if (!current_process) return NULL;
+
+    pcb_t *child = create_process_empty();
+    if (!child) return NULL;
+
+    // 复制父进程信息
+    strcpy(child->name, current_process->name);
+    child->parent = current_process;
+    child->page_dir = clone_user_space(current_process->page_dir);
+    child->brk = current_process->brk;
+
+    // 复制文件描述符表
+    for (int i = 0; i < 16; i++) child->fd[i] = current_process->fd[i];
+
+    // 复制寄存器上下文（栈，指令指针等）
+    child->eip = current_process->eip;
+    child->esp = current_process->esp;
+    child->ebp = current_process->ebp;
+    child->eax = 0;  // 子进程返回 0
+    child->ecx = current_process->ecx;
+    child->edx = current_process->edx;
+    child->ebx = current_process->ebx;
+    child->esi = current_process->esi;
+    child->edi = current_process->edi;
+
+    child->cs = current_process->cs;
+    child->ds = current_process->ds;
+    child->es = current_process->es;
+    child->fs = current_process->fs;
+    child->gs = current_process->gs;
+    child->ss = current_process->ss;
+
+    child->eflags = current_process->eflags;
+    child->state = PROCESS_READY;
+    enqueue_process(child);
+
+    // 父进程返回子进程 PID（在 sys_fork 中处理）
+    return child;
+}
+
+// 退出进程
+void exit_process(int exit_code) {
+    if (!current_process) return;
+
+    current_process->exit_code = exit_code;
+    current_process->state = PROCESS_TERMINATED;
+
+    // 唤醒可能等待的父进程
+    // (此处简化，真正的 waitpid 会检查)
+
+    // 强制调度
+    scheduler_get_next();
+}
+
+// 等待子进程
+void wait_process(int pid) {
+    (void)pid;
+    // 简化实现：将当前进程阻塞，直到子进程退出（由调度器处理）
+    current_process->state = PROCESS_BLOCKED;
+    // 可以添加等待队列，这里直接让出CPU
+    scheduler_get_next();
+}
+
+// 睡眠（毫秒）
+void sleep_process(uint32_t ms) {
+    // 简化：将进程标记为阻塞，由定时器唤醒
+    current_process->sleep_until = get_time_ms() + ms;
+    current_process->state = PROCESS_BLOCKED;
+    scheduler_get_next();
+}
+
+// 杀死进程
+int32_t kill_process(int pid, int sig) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (process_table[i].pid == pid && process_table[i].state != PROCESS_TERMINATED) {
+            process_table[i].state = PROCESS_TERMINATED;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+// 主动让出 CPU
+void yield(void) {
+    asm volatile("int $0x20");  // 假设 0x20 是调度中断
 }
