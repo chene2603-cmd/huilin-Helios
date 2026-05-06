@@ -5,16 +5,15 @@
 #include "timer.h"
 #include "string.h"
 #include "isr.h"
+#include "pmm.h"
+#include "vmm.h"
+#include "paging.h"
 
-// --------------------------------------------------------
 // 系统调用表
-// --------------------------------------------------------
 static syscall_info_t syscall_table[MAX_SYSCALLS];
 static uint32_t syscall_count = 0;
 
-// --------------------------------------------------------
-// 极简 ramdisk（用于 execve 加载用户程序）
-// --------------------------------------------------------
+// ---------- 极简 ramdisk ----------
 #define RAMDISK_MAX 8
 static struct {
     const char *name;
@@ -22,7 +21,7 @@ static struct {
     uint32_t   size;
 } ramdisk[RAMDISK_MAX];
 
-// 注册一个用户程序到 ramdisk
+// 注册用户程序到 ramdisk
 static int ramdisk_register(const char *name, uint8_t *code, uint32_t size) {
     for (int i = 0; i < RAMDISK_MAX; i++) {
         if (ramdisk[i].name && strcmp(ramdisk[i].name, name) == 0) {
@@ -40,14 +39,13 @@ static int ramdisk_register(const char *name, uint8_t *code, uint32_t size) {
     return -1;
 }
 
-// 从 ramdisk 加载程序到用户空间，返回入口和栈顶
+// 从 ramdisk 加载二进制到用户空间，返回入口和栈顶
 static int ramdisk_load(const char *path, void **entry, void **stack_top) {
     for (int i = 0; i < RAMDISK_MAX && ramdisk[i].name; i++) {
         if (strcmp(ramdisk[i].name, path) == 0) {
-            if (!ramdisk[i].data)
-                return -1;
+            if (!ramdisk[i].data) return -1;
 
-            void *user_base = (void*)0x400000;     // 用户代码起始虚拟地址
+            void *user_base = (void*)0x400000;
             uint8_t *code = ramdisk[i].data;
             uint32_t size = ramdisk[i].size;
 
@@ -61,7 +59,7 @@ static int ramdisk_load(const char *path, void **entry, void **stack_top) {
                 memcpy(vaddr, code + off, chunk);
             }
 
-            // 映射用户栈（1页，位于 0xBFC00000 附近）
+            // 用户栈
             void *stack_vaddr = (void*)0xBFC00000;
             void *stack_page = pmm_alloc_page();
             if (!stack_page) return -1;
@@ -76,16 +74,13 @@ static int ramdisk_load(const char *path, void **entry, void **stack_top) {
     return -1;
 }
 
-// --------------------------------------------------------
-// 系统调用初始化
-// --------------------------------------------------------
+// 初始化系统调用
 void init_syscalls(void) {
     screen_putstr("Initializing System Calls... ");
 
     memset(syscall_table, 0, sizeof(syscall_table));
     syscall_count = 0;
 
-    // 注册系统调用（编号与名称）
     register_syscall(SYS_EXIT,    "exit",    (syscall_t)sys_exit);
     register_syscall(SYS_FORK,    "fork",    (syscall_t)sys_fork);
     register_syscall(SYS_READ,    "read",    (syscall_t)sys_read);
@@ -102,7 +97,6 @@ void init_syscalls(void) {
     register_syscall(SYS_SBRK,    "sbrk",    (syscall_t)sys_sbrk);
     register_syscall(SYS_KILL,    "kill",    (syscall_t)sys_kill);
 
-    // 注册中断处理
     register_interrupt_handler(0x80, syscall_handler);
 
     screen_setcolor(COLOR_LIGHT_GREEN, COLOR_BLACK);
@@ -113,9 +107,7 @@ void init_syscalls(void) {
     screen_putstr(" system calls\n");
 }
 
-// --------------------------------------------------------
-// 系统调用分发
-// --------------------------------------------------------
+// 系统调用处理程序
 void syscall_handler(registers_t* regs) {
     uint32_t num = regs->eax;
 
@@ -130,7 +122,6 @@ void syscall_handler(registers_t* regs) {
     regs->eax = result;
 }
 
-// 注册/查询
 int32_t register_syscall(uint32_t num, const char* name, syscall_t handler) {
     if (num >= MAX_SYSCALLS || syscall_table[num].handler)
         return -1;
@@ -146,28 +137,22 @@ syscall_info_t* get_syscall_info(uint32_t num) {
     return &syscall_table[num];
 }
 
-// ================================================
-// 系统调用具体实现
-// ================================================
+// ========== 系统调用实现 ==========
 
-// ----- exit -----
 int32_t sys_exit(int exit_code) {
     exit_process(exit_code);
     return 0;
 }
 
-// ----- fork -----
 int32_t sys_fork(void) {
     pcb_t* child = fork_process();
     return child ? child->pid : -1;
 }
 
-// ----- read -----
 int32_t sys_read(int fd, void* buf, uint32_t count) {
-    if (fd == 0) {   // stdin
+    if (fd == 0) {
         char* buffer = (char*)buf;
         uint32_t i = 0;
-
         while (i < count) {
             uint8_t key = inb(0x60);
             if (key < 0x80) {
@@ -175,10 +160,7 @@ int32_t sys_read(int fd, void* buf, uint32_t count) {
                 switch (key) {
                     case 0x1C: c = '\n'; break;
                     case 0x0E:
-                        if (i > 0) {
-                            i--;
-                            buffer[i] = '\0';
-                        }
+                        if (i > 0) { i--; buffer[i] = '\0'; }
                         break;
                     case 0x39: c = ' '; break;
                     default:
@@ -193,11 +175,10 @@ int32_t sys_read(int fd, void* buf, uint32_t count) {
                 }
                 if (c && i < count) {
                     buffer[i++] = c;
-                    screen_putchar(c);   // 回显
+                    screen_putchar(c);
                     if (c == '\n') break;
                 }
             }
-            // 简单延时
             for (volatile int j = 0; j < 1000; j++);
         }
         return i;
@@ -205,7 +186,6 @@ int32_t sys_read(int fd, void* buf, uint32_t count) {
     return -1;
 }
 
-// ----- write -----
 int32_t sys_write(int fd, const void* buf, uint32_t count) {
     if (fd == 1 || fd == 2) {
         const char* buffer = (const char*)buf;
@@ -216,19 +196,14 @@ int32_t sys_write(int fd, const void* buf, uint32_t count) {
     return -1;
 }
 
-// ----- open -----
 int32_t sys_open(const char* path, int flags, int mode) {
     if (strcmp(path, "/dev/tty") == 0 ||
-        strcmp(path, "/dev/console") == 0)
-        return 0;
-    if (strcmp(path, "/dev/stdout") == 0)
-        return 1;
-    if (strcmp(path, "/dev/stderr") == 0)
-        return 2;
+        strcmp(path, "/dev/console") == 0) return 0;
+    if (strcmp(path, "/dev/stdout") == 0) return 1;
+    if (strcmp(path, "/dev/stderr") == 0) return 2;
     return -1;
 }
 
-// ----- close -----
 int32_t sys_close(int fd) {
     pcb_t* proc = get_current_process();
     if (fd < 0 || fd >= 16) return -1;
@@ -236,7 +211,6 @@ int32_t sys_close(int fd) {
     return 0;
 }
 
-// ----- execve -----
 int32_t sys_execve(const char* path, char* const argv[], char* const envp[]) {
     void *entry, *stack_top;
     if (ramdisk_load(path, &entry, &stack_top) != 0) {
@@ -247,21 +221,18 @@ int32_t sys_execve(const char* path, char* const argv[], char* const envp[]) {
         return -1;
     }
 
-    // 设置当前进程的上下文以便返回用户态时执行新程序
     pcb_t* cur = get_current_process();
-    cur->context.eip = (uint32_t)entry;
-    cur->context.esp = (uint32_t)stack_top;
+    cur->eip = (uint32_t)entry;
+    cur->esp = (uint32_t)stack_top;
     return 0;
 }
 
-// ----- waitpid -----
 int32_t sys_waitpid(int pid, int* status, int options) {
     wait_process(pid);
     if (status) *status = 0;
     return pid;
 }
 
-// ----- brk -----
 int32_t sys_brk(void* addr) {
     pcb_t* proc = get_current_process();
     if (!addr) return proc->brk;
@@ -269,29 +240,24 @@ int32_t sys_brk(void* addr) {
     return 0;
 }
 
-// ----- getpid -----
 int32_t sys_getpid(void) {
     return get_pid();
 }
 
-// ----- sleep -----
 int32_t sys_sleep(uint32_t milliseconds) {
     sleep_process(milliseconds);
     return 0;
 }
 
-// ----- gettime -----
 int32_t sys_gettime(void) {
     return get_time_ms();
 }
 
-// ----- yield -----
 int32_t sys_yield(void) {
     yield();
     return 0;
 }
 
-// ----- sbrk -----
 int32_t sys_sbrk(int32_t increment) {
     pcb_t* proc = get_current_process();
     uint32_t old = proc->brk;
@@ -299,13 +265,11 @@ int32_t sys_sbrk(int32_t increment) {
     return old;
 }
 
-// ----- kill -----
 int32_t sys_kill(int pid, int sig) {
     kill_process(pid, sig);
     return 0;
 }
 
-// ----- dup -----
 int32_t sys_dup(int oldfd) {
     pcb_t* proc = get_current_process();
     if (oldfd < 0 || oldfd >= 16 || proc->fd[oldfd] == -1)
@@ -319,11 +283,9 @@ int32_t sys_dup(int oldfd) {
     return -1;
 }
 
-// ----- pipe -----
 int32_t sys_pipe(int pipefd[2]) {
     pcb_t* proc = get_current_process();
     int fd1 = -1, fd2 = -1;
-
     for (int i = 3; i < 16; i++) {
         if (proc->fd[i] == -1) {
             if (fd1 == -1) fd1 = i;
@@ -331,9 +293,8 @@ int32_t sys_pipe(int pipefd[2]) {
         }
     }
     if (fd1 == -1 || fd2 == -1) return -1;
-
-    proc->fd[fd1] = 100;  // 读端
-    proc->fd[fd2] = 101;  // 写端
+    proc->fd[fd1] = 100;
+    proc->fd[fd2] = 101;
     if (pipefd) {
         pipefd[0] = fd1;
         pipefd[1] = fd2;
@@ -341,13 +302,11 @@ int32_t sys_pipe(int pipefd[2]) {
     return 0;
 }
 
-// ----- chdir -----
 int32_t sys_chdir(const char* path) {
     (void)path;
-    return 0;   // 总是成功（假实现）
+    return 0;
 }
 
-// ----- getcwd -----
 int32_t sys_getcwd(char* buf, uint32_t size) {
     if (!buf || size < 2) return -1;
     buf[0] = '/';
@@ -355,7 +314,6 @@ int32_t sys_getcwd(char* buf, uint32_t size) {
     return 1;
 }
 
-// ----- stat -----
 int32_t sys_stat(const char* path, void* statbuf) {
     if (!statbuf) return -1;
     struct stat* st = (struct stat*)statbuf;
@@ -365,16 +323,11 @@ int32_t sys_stat(const char* path, void* statbuf) {
     return 0;
 }
 
-// --------------------------------------------------------
-// 显示系统调用表
-// --------------------------------------------------------
 void show_syscalls(void) {
     screen_setcolor(COLOR_LIGHT_CYAN, COLOR_BLACK);
     screen_putstr("\nSystem Call Table:\n");
     screen_setcolor(COLOR_LIGHT_GREY, COLOR_BLACK);
-
-    screen_putstr("Num  Name\n");
-    screen_putstr("---  -----\n");
+    screen_putstr("Num  Name\n---  -----\n");
     for (uint32_t i = 0; i < MAX_SYSCALLS; i++) {
         if (syscall_table[i].handler) {
             screen_putdec(i);
