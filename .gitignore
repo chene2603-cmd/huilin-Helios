@@ -1,0 +1,19 @@
+# 编译产物
+build/
+*.o
+*.bin
+*.iso
+iso/
+
+# 编辑器临时文件
+*~
+*.swp
+*.swo
+.DS_Store
+
+# GDB 相关
+.gdb_history
+
+# 可执行文件
+helios.bin
+helios.iso
