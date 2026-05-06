@@ -1,104 +1,88 @@
-# Helios OS Makefile
-# 编译工具定义
-AS = nasm
-CC = gcc
-LD = ld
-QEMU = qemu-system-i386
-GRUB_MKRESCUE = grub-mkrescue
+# =============================================
+#  Helios Kernel Makefile
+# =============================================
 
-# 编译选项
-ASFLAGS = -f elf32
-CFLAGS = -m32 -ffreestanding -fno-pic -fno-builtin -nostdlib \
-         -Wall -Wextra -Werror -std=c99 -Iinclude
-LDFLAGS = -m elf_i386 -T linker.ld -nostdlib
+ASM      = nasm
+CC       = gcc
+LD       = ld
 
-# 目录定义
-SRC_DIR = kernel
-BOOT_DIR = boot
-BUILD_DIR = build
-ISO_DIR = iso
-BOOT_DIR = $(ISO_DIR)/boot
-GRUB_DIR = $(ISO_DIR)/boot/grub
+# 编译标志
+CFLAGS   = -m32 -ffreestanding -nostdinc -fno-builtin -fno-stack-protector \
+           -nostartfiles -nodefaultlibs -Wall -Wextra -c -I./include
+ASMFLAGS = -f elf32
+LDFLAGS  = -T linker.ld -m elf_i386 -nostdlib
 
-# 源文件
-KERNEL_SRCS = $(wildcard $(SRC_DIR)/*.c)
-KERNEL_ASM_SRCS = $(wildcard $(SRC_DIR)/*.asm)
-BOOT_SRCS = $(wildcard $(BOOT_DIR)/*.asm)
+# 目录
+BOOT_DIR   = boot
+KERNEL_DIR = kernel
+BUILD_DIR  = build
 
-# 目标文件
-KERNEL_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(KERNEL_SRCS)) \
-              $(patsubst $(SRC_DIR)/%.asm,$(BUILD_DIR)/%.o,$(KERNEL_ASM_SRCS))
-BOOT_OBJS = $(patsubst $(BOOT_DIR)/%.asm,$(BUILD_DIR)/%.o,$(BOOT_SRCS))
+# 引导文件
+BOOT_ASM = $(BOOT_DIR)/boot.asm
+BOOT_OBJ = $(BUILD_DIR)/boot.o
 
-# 最终目标
-TARGET = helios.bin
-ISO = helios.iso
+# 内核 C 文件（自动收集）
+KERNEL_C = $(wildcard $(KERNEL_DIR)/*.c)
+KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c, $(BUILD_DIR)/%.o, $(KERNEL_C))
+
+# 内核汇编文件
+KERNEL_ASM = $(wildcard $(KERNEL_DIR)/*.asm)
+KERNEL_ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.asm, $(BUILD_DIR)/%.o, $(KERNEL_ASM))
+
+# 所有目标文件
+OBJS = $(BOOT_OBJ) $(KERNEL_OBJ) $(KERNEL_ASM_OBJ)
+
+# 输出文件
+KERNEL_BIN = $(BUILD_DIR)/kernel.bin
+ISO_FILE   = helios.iso
 
 # 默认目标
-all: $(BUILD_DIR) $(ISO)
+all: $(BUILD_DIR) $(KERNEL_BIN)
 
 # 创建构建目录
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-# 编译内核C文件
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# 编译汇编文件
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.asm
-	$(AS) $(ASFLAGS) $< -o $@
-
-# 编译引导文件
-$(BUILD_DIR)/boot.o: $(BOOT_DIR)/boot.asm
-	$(AS) -f bin $< -o $@
-
 # 链接内核
-$(BUILD_DIR)/kernel.bin: $(KERNEL_OBJS)
+$(KERNEL_BIN): $(OBJS)
 	$(LD) $(LDFLAGS) -o $@ $^
 
-# 创建ISO
-$(ISO): $(BUILD_DIR)/kernel.bin
-	# 创建ISO目录结构
-	mkdir -p $(GRUB_DIR)
-	
-	# 复制内核
-	cp $(BUILD_DIR)/kernel.bin $(BOOT_DIR)/
-	
-	# 创建GRUB配置
-	echo 'set timeout=0' > $(GRUB_DIR)/grub.cfg
-	echo 'set default=0' >> $(GRUB_DIR)/grub.cfg
-	echo '' >> $(GRUB_DIR)/grub.cfg
-	echo 'menuentry "Helios OS" {' >> $(GRUB_DIR)/grub.cfg
-	echo '  multiboot /boot/kernel.bin' >> $(GRUB_DIR)/grub.cfg
-	echo '  boot' >> $(GRUB_DIR)/grub.cfg
-	echo '}' >> $(GRUB_DIR)/grub.cfg
-	
-	# 创建ISO
-	$(GRUB_MKRESCUE) -o $(ISO) $(ISO_DIR)
-	
-	# 清理临时目录
-	rm -rf $(ISO_DIR)
+# 编译 boot.asm（必须是 ELF32）
+$(BUILD_DIR)/boot.o: $(BOOT_ASM)
+	$(ASM) -f elf32 $< -o $@
 
-# 运行QEMU
-run: $(ISO)
-	$(QEMU) -cdrom $(ISO) -monitor stdio
+# 编译内核汇编文件
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.asm
+	$(ASM) $(ASMFLAGS) $< -o $@
 
-# 调试运行
-debug: $(ISO)
-	$(QEMU) -s -S -cdrom $(ISO) -monitor stdio &
-	gdb -ex "target remote localhost:1234" \
-	    -ex "symbol-file $(BUILD_DIR)/kernel.bin" \
-	    -ex "break kernel_main" \
-	    -ex "continue"
+# 编译内核 C 文件
+$(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c
+	$(CC) $(CFLAGS) $< -o $@
+
+# ISO 生成（可选）
+iso: $(KERNEL_BIN)
+	mkdir -p iso/boot/grub
+	cp $(KERNEL_BIN) iso/boot/kernel.bin
+	echo 'set timeout=0' > iso/boot/grub/grub.cfg
+	echo 'set default=0' >> iso/boot/grub/grub.cfg
+	echo 'menuentry "Helios" {' >> iso/boot/grub/grub.cfg
+	echo '    multiboot /boot/kernel.bin' >> iso/boot/grub/grub.cfg
+	echo '}' >> iso/boot/grub/grub.cfg
+	grub-mkrescue -o $(ISO_FILE) iso 2>/dev/null
+	rm -rf iso
+
+# QEMU 运行
+run: $(KERNEL_BIN)
+	qemu-system-i386 -kernel $(KERNEL_BIN) -serial stdio
+
+# 调试模式
+debug: $(KERNEL_BIN)
+	qemu-system-i386 -s -S -kernel $(KERNEL_BIN) &
+	sleep 1
+	gdb -ex "target remote localhost:1234" -ex "symbol-file $(KERNEL_BIN)"
 
 # 清理
 clean:
-	rm -rf $(BUILD_DIR) $(ISO_DIR) $(ISO) *.iso
+	rm -rf $(BUILD_DIR) $(ISO_FILE) iso
 
-# 格式化代码
-format:
-	find . -name "*.c" -o -name "*.h" | xargs clang-format -i
-	find . -name "*.asm" | xargs nasmfmt -i
-
-.PHONY: all run debug clean format
+.PHONY: all iso run debug clean
