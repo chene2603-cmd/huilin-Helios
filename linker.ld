@@ -1,39 +1,40 @@
-/* 链接器脚本 */
-OUTPUT_FORMAT(elf32-i386)
+/* linker.ld */
 ENTRY(_start)
 
 SECTIONS
 {
-    /* 内核加载地址 */
-    . = 0x100000;
-    
-    /* 多引导头 */
-    .multiboot : {
+    . = 1M;                /* 内核从 1MB 开始加载 */
+
+    .multiboot ALIGN(4) :
+    {
         *(.multiboot)
     }
-    
-    /* 代码段 */
-    .text : {
+
+    .text BLOCK(4K) : ALIGN(4K)
+    {
         *(.text)
     }
-    
-    /* 只读数据段 */
-    .rodata : {
+
+    .rodata BLOCK(4K) : ALIGN(4K)
+    {
         *(.rodata)
     }
-    
-    /* 数据段 */
-    .data : {
+
+    .data BLOCK(4K) : ALIGN(4K)
+    {
         *(.data)
     }
-    
-    /* BSS段 */
-    .bss : {
+
+    .bss BLOCK(4K) : ALIGN(4K)
+    {
         *(COMMON)
         *(.bss)
     }
-    
-    /* 结束标记 */
-    . = ALIGN(4096);
-    _end = .;
+
+    /DISCARD/ :
+    {
+        *(.comment)
+        *(.note)
+        *(.eh_frame)
+    }
 }
